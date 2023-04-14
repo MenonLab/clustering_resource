@@ -1,0 +1,241 @@
+---
+title: "Single-Cell Clustering:\nPart 1 - Quality Control & Pre-processing"
+author: "Pallavi Gaur, Matti Lam, Victoria Marshe, Archana Yadav"
+date: "March 31, 2023"
+output:
+  rmarkdown::html_document:
+    theme: cerulean
+    toc: true
+    toc_float: true
+---
+
+*Acknowledgements:* Thank you to Pallavi and Matti for making their tutorial code available.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", fig.height=4)
+```
+
+```{r libraries, include = FALSE}
+# If the below packages are not installed run:
+# install.packages(c("Seurat", "tidyverse", "patchwork", "devtools"))
+# BiocManager::install("scRNAseq")
+
+library(Seurat)
+library(tidyverse)
+library(scRNAseq) 
+library(patchwork)
+library(devtools)
+```
+
+# Data
+
+We will use data from 58,654 peripheral blood mononuclear cells (PBMCs) from Kotliarov *et al.* (2020). [Broad immune activation underlies shared set point signatures for vaccine responsiveness in healthy individuals and disease activity in patients with lupus.](https://www.nature.com/articles/s41591-020-0769-8) *Nat. Med.* 26, 618-629. This dataset contains 20 samples (2 experimental batches) with 5 high and 5 low responders each.
+
+Otherwise, begin with a count matrix.
+
+```{r load_data}
+
+# Data is formatted as an SCE object
+data = KotliarovPBMCData(mode = c("rna")) 
+# can also request ADT counts, which is the CITEseq proteins, using mode = c("rna", "adt")
+
+meta_data = data@colData
+
+counts = data@assays@data$counts
+colnames(counts) = rownames(meta_data)
+
+# Here, we turn the data into a Seurat object
+data = CreateSeuratObject(counts)
+
+for(i in 5:24){
+  tmp = meta_data[,i]
+  names(tmp) = rownames(meta_data)
+  data = AddMetaData(data, tmp, col.name = names(meta_data)[i])
+}
+
+```
+
+# Quality Control
+
+The steps below encompass the standard pre-processing workflow for scRNA-seq data in Seurat. These represent the selection and filtration of cells based on QC metrics, data normalization and scaling, and the detection of highly variable features. Seurat allows you to easily explore QC metrics and filter cells based on any user-defined criteria. A few QC metrics commonly used by the community include:
+
+-   The number of unique genes detected in each cell.
+-   Low-quality cells or empty droplets will often have very few genes
+-   Cell doublets or multiplets may exhibit an aberrantly high gene count
+-   The total number of molecules detected within a cell (correlates strongly with unique genes)
+-   The percentage of reads that map to the mitochondrial genome
+-   Low-quality / dying cells often exhibit extensive mitochondrial contamination.
+
+## QC metrics
+
+Here we visualize QC metrics and use these to filter cells.
+
+-   **nCount_RNA:** the number of UMI counts taken across all cells. UMI (unique molecule identifier) represents the absolute number of observed transcripts (per gene, cell or sample). .
+-   **nFeature_RNA:** the number of any genes with at least 1 UMI count.
+-   **percent.mt:** the proportion of counts from mitochondrial genes. We calculate mitochondrial QC metrics with the PercentageFeatureSet() function and define the set of mitochondrial genes as all genes starting with 'MT-'.
+
+```{r metrics}
+
+data[["percent.mt"]] <- PercentageFeatureSet(data, pattern = "^MT-")
+
+VlnPlot(data, features = c("nCount_RNA","nFeature_RNA", "percent.mt"), 
+        ncol = 3, 
+        pt.size = 0)
+
+plot1 <- FeatureScatter(data, 
+                        feature1 = "nCount_RNA", 
+                        feature2 = "percent.mt") + 
+  NoLegend()
+
+plot2 <- FeatureScatter(data, 
+                        feature1 = "nCount_RNA", 
+                        feature2 = "nFeature_RNA") + 
+  NoLegend()
+
+wrap_plots(plot1, plot2)
+
+```
+
+## Data subset
+
+We filter cells that have UMI counts over 10000 or less than 500, gene counts greater than 2500 or less than 200, and \>5% reads from mitochondrial genes.
+
+```{r subset}
+data <- subset(data, subset = nCount_RNA >500 &  nCount_RNA < 10000 & 
+                 nFeature_RNA >200 &  nFeature_RNA < 2500 & percent.mt < 5)
+data
+```
+
+## Normalization
+
+After removing unwanted cells from the dataset, the next step is to normalize the data. By default, we employ a global-scaling normalization method ?LogNormalize? that normalizes the feature expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result. Normalized values are stored in dataname[["RNA"]]@data.
+
+There are other available normalization approaches, including SCTransform. Note, SCTransform is a single command which replaces NormalizeData(), ScaleData(), and FindVariableFeatures().
+
+```{r normalize}
+
+data <- NormalizeData(data, normalization.method = "LogNormalize", scale.factor = 10000)
+
+```
+
+## Variable Features
+
+We next calculate a subset of features that exhibit high cell-to-cell variation in the dataset (i.e, they are highly expressed in some cells, and lowly expressed in others). It has been found that focusing on these genes in downstream analysis helps to highlight biological signal in single-cell datasets.
+
+The function FindVariableFeatures() directly models the mean-variance relationship inherent in single-cell data taking 2,000 features by default per dataset. These will be used in downstream analysis, like PCA.
+
+```{r find_var}
+data <- FindVariableFeatures(data, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 20 most highly variable genes
+top20 <- head(VariableFeatures(data), 20)
+# plot variable features with and without labels
+#plot1 <- VariableFeaturePlot(data)
+#plot1 <- LabelPoints(plot = plot1, points = top20, repel = TRUE) + NoLegend()
+#plot1
+```
+
+## Scaling
+
+Next, we apply a linear transformation (scaling) that is a standard pre-processing step prior to dimensional reduction techniques like PCA. The ScaleData() function:
+
+-   Shifts the expression of each gene, so that the mean expression across cells is 0.
+
+-   Scales the expression of each gene, so that the variance across cells is 1
+
+This step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate. The results of this are stored in dataname[["RNA"]]@scale.data
+
+Scaling is an essential for input to PCA. The default in ScaleData() only performs scaling on the previously identified variable features (2,000 by default).
+
+```{r scale, fig.width=10}
+
+VlnPlot(data, 
+        features = "nCount_RNA", 
+        pt.size = 0, 
+        group.by = "sampleid") +
+  labs(x = "Sample ID", y = "UMI", title = "Sample ID")
+
+VlnPlot(data, features = c("nCount_RNA"), 
+        pt.size = 0, 
+        group.by = "tenx_lane",
+        split.by = "batch") +
+  labs(x = "10X Lane (Batch B1 & B2)", y = "UMI", title = "10X Lane by Batch")
+
+VlnPlot(data, 
+        features = c("nCount_RNA"), 
+        pt.size = 0, 
+        group.by = "adjmfc.time",
+        split.by = "batch", 
+        split.plot = T,
+        log = T) + 
+  labs(x = "Baseline Response Status", y = "UMI", title = "Response by Batch")
+
+# We can scale all genes for downstream visualization 
+# data <- ScaleData(data, features = rownames(data))
+
+# Here we're going to regress out the effects of batch for the most variable
+# features we will use for PCA
+data <- ScaleData(data, 
+                  features = VariableFeatures(object = data), 
+                  vars.to.regress = "batch")
+
+```
+
+# Dimensionality reduction
+
+Next we perform PCA on the scaled data. By default, only the previously determined variable features are used as input, but can be defined using features argument if you wish to choose a different subset. Seurat provides several useful ways of visualizing both cells and features that define the PCA, including VizDimReduction(), DimPlot(), and DimHeatmap().
+
+```{r heatmap, fig.height=5}
+
+data <- RunPCA(data, features = VariableFeatures(object = data), npcs = 40)
+#DimHeatmap(data, dims = 1:9, cells = 500, balanced = TRUE)
+
+```
+
+## Determining dimensionality
+
+**Elbow plot**: a ranking of principle components based on the percentage of variance explained by each one (ElbowPlot() function).
+
+```{r elbow}
+
+ElbowPlot(data, ndims = 40)
+# Here, we will use the first 30 PCs.
+ndims = 30
+```
+
+## Non-linear dimensional reduction (UMAP/tSNE)
+
+Seurat offers several non-linear dimensional reduction techniques, such as tSNE and UMAP, to visualize and explore these datasets. The goal of these algorithms is to learn the underlying manifold of the data in order to place similar cells together in low-dimensional space. Cells within the graph-based clusters determined above should co-localize on these dimension reduction plots. As input to the UMAP and tSNE, we suggest using the same PCs as input to the clustering analysis.
+
+```{r viz, fig.width=10}
+
+#data <- RunTSNE(data, dims = 1:ndims)
+
+#data <- FindNeighbors(data, dims = 1:ndims, k.param = 30)
+data <- RunUMAP(data, dims = 1:30, n.neighbors = 30)
+
+#p1 = DimPlot(data, reduction = "pca", label = F) + NoLegend() + ggtitle("PCA")
+#p2 = DimPlot(data, reduction = "tsne", label = F) + NoLegend()+ ggtitle("t-SNE")s
+DimPlot(data, reduction = "umap", label = F) + NoLegend()+ ggtitle("UMAP")
+# p3)
+
+```
+
+
+```{r}
+saveRDS(data, "data.rds")
+```
+
+
+# References
+
+1.  [Seurat - Guided Clustering Tutorial](https://satijalab.org/seurat/articles/pbmc3k_tutorial.html)
+2.  [Harvard Chan Bioinformatics Core Training](https://github.com/hbctraining/scRNA-seq_online/blob/master/schedule/links-to-lessons.md)
+3.  Kotliarov *et al.* (2020). [Broad immune activation underlies shared set point signatures for vaccine responsiveness in healthy individuals and disease activity in patients with lupus.](https://www.nature.com/articles/s41591-020-0769-8) *Nat. Med.* 26, 618-629.
+
+# Session Info
+
+```{r, warning=F}
+
+session_info(pkgs = "attached", info = c("platform", "packages"))
+```

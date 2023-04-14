@@ -1,0 +1,119 @@
+---
+title: "Part2-Clustering"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(scRNAseq) # installs using BiocManager::install("scRNAseq")
+library(patchwork)
+library(Azimuth)
+```
+
+```{r}
+data <- readRDS("data.rds")
+```
+
+
+```{r}
+data <- RunUMAP(data, dims = 1:30)
+```
+
+
+```{r}
+head(data@meta.data)
+```
+```{r}
+table(data$adjmfc.time,data$sample )
+```
+
+```{r}
+DimPlot(data)
+DimPlot(data, group.by = "batch")
+DimPlot(data, split.by = "batch")
+
+```
+
+```{r}
+#FindNeighbors
+data <- FindNeighbors(data, dims = 1:30, k.param = 30)
+
+```
+
+```{r}
+#data <- FindClusters(data, resolution = c(0.1, 0.5,0.8,1))
+data <- FindClusters(data, resolution = c(1.5,2))
+
+```
+```{r}
+head(data@meta.data)
+```
+```{r}
+table(data$sample, data$RNA_snn_res.0.5)
+```
+
+```{r}
+#DimPlot(data)
+DimPlot(data, group.by = "RNA_snn_res.0.1", label = T)
+DimPlot(data, group.by = "RNA_snn_res.0.5", label = T)
+DimPlot(data, group.by = "RNA_snn_res.0.8", label = T)
+DimPlot(data, group.by = "RNA_snn_res.1", label = T)
+
+
+```
+
+```{r}
+DimPlot(data, group.by = "RNA_snn_res.1.5", label = T)
+DimPlot(data, group.by = "RNA_snn_res.2", label = T)
+
+```
+
+
+
+```{r}
+#annotation using an already available refence set
+data_azimuth <- RunAzimuth(data,  
+                           reference = "pbmcref", 
+                           assay = "RNA",
+                           verbose = F)
+
+```
+
+```{r}
+head(data_azimuth@meta.data)
+```
+
+
+```{r}
+p1 = DimPlot(data_azimuth, 
+             group.by = "predicted.celltype.l1", 
+             label = TRUE, 
+             label.size = 3)  + 
+  NoLegend()
+
+p2 = DimPlot(data_azimuth, 
+             group.by = "predicted.celltype.l2", 
+             label = TRUE,
+             label.size = 3)  + 
+  NoLegend()
+wrap_plots(p1, p2)
+
+```
+```{r}
+table(data_azimuth$predicted.celltype.l1,data_azimuth$predicted.celltype.l2)
+```
+
+```{r}
+table(data_azimuth$predicted.celltype.l2,data_azimuth$adjmfc.time)
+```
+
+
+```{r}
+## manual annotation: look at marker genes for each cluster, requires expertise
+Idents(data) <- "RNA_snn_res.1"
+PBMCmarkers_res1 <- FindAllMarkers(data,only.pos = T)
+```
+
+
+
